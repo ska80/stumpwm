@@ -1,6 +1,6 @@
 (in-package #:cl-user)
 
-#-(or sbcl clisp ccl ecl lispworks6)
+#-(or sbcl lispworks7+)
 (error "This lisp implementation is not supported.")
 
 (require 'asdf)
@@ -9,7 +9,7 @@
 (progn
   (setf *compile-print* 1)
   (toggle-source-debugging t)
-  (lw:set-default-character-element-type 'lw:simple-char)
+  (lw:set-default-character-element-type 'character)
 
   (unless
       (dolist (install-path

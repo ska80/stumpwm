@@ -1,4 +1,4 @@
-;; package.lisp -- 
+;; package.lisp --
 ;; Copyright (C) 2003-2008 Shawn Betts
 ;;
 ;;  This file is part of stumpwm.
@@ -17,9 +17,10 @@
 ;; along with this software; see the file COPYING.  If not, see
 ;; <http://www.gnu.org/licenses/>.
 
-(defpackage :stumpwm
-  (:use :cl)
+(defpackage #:stumpwm
+  (:use #:cl
+        #:alexandria)
   (:shadow #:yes-or-no-p #:y-or-n-p))
 
-(defpackage :stumpwm-user
-  (:use :cl :stumpwm))
+(defpackage #:stumpwm-user
+  (:use #:cl #:stumpwm))

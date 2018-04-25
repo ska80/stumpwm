@@ -26,11 +26,11 @@
 
 (export '(defprogram-shortcut
           pathname-is-executable-p
-	  programs-in-path
-	  restarts-menu
-	  run-or-raise
+          programs-in-path
+          restarts-menu
+          run-or-raise
           run-or-pull
-	  run-shell-command
+          run-shell-command
           window-send-string))
 
 (defun restarts-menu (err)
@@ -106,29 +106,22 @@ your X server and CLX implementation support XTEST."
     (send-fake-click (current-window) button)))
 
 (defun programs-in-path (&optional full-path (path (split-string (getenv "PATH") ":")))
-  "Return a list of programs in the path. if @var{full-path} is
+  "Return a list of programs in the path. If @var{full-path} is
 @var{t} then return the full path, otherwise just return the
 filename. @var{path} is by default the @env{PATH} evironment variable
 but can be specified. It should be a string containing each directory
 seperated by a colon."
   (sort
-   (loop
-      for p in path
-      for dir = (probe-path p)
-      when dir
-      nconc (loop
-               for file in (union
-                            ;; SBCL doesn't match files with types if type
-                            ;; is not wild and CLISP won't match files
-                            ;; without a type when type is wild. So cover all the bases
-                            (directory-no-deref (merge-pathnames (make-pathname :name :wild) dir))
-                            (directory-no-deref (merge-pathnames (make-pathname :name :wild :type :wild) dir))
-                            :test 'equal)
-               for namestring = (file-namestring file)
-               when (pathname-is-executable-p file)
-               collect (if full-path
-                           (namestring file)
-                           namestring)))
+   (loop for p in path
+         for dir = (probe-path p)
+         when dir
+           nconc (loop for file in (directory (merge-pathnames (make-pathname :name :wild :type :wild) dir)
+                                              :resolve-symlinks nil)
+                       for namestring = (file-namestring file)
+                       when (pathname-is-executable-p file)
+                         collect (if full-path
+                                     (namestring file)
+                                     namestring)))
    #'string<))
 
 (defstruct path-cache
@@ -141,7 +134,7 @@ seperated by a colon."
   "Update the cache of programs in the path stored in @var{*programs-list*} when needed."
   (let ((dates (mapcar (lambda (p)
                          (when (probe-path p)
-                           (portable-file-write-date p)))
+                           (file-write-date p)))
                        paths)))
     (finish-output)
     (unless (and *path-cache*
@@ -156,7 +149,7 @@ seperated by a colon."
 with base. Automagically update the cache."
   (rehash)
   (remove-if-not #'(lambda (p)
-		     (when (<= (length base) (length p))
+                     (when (<= (length base) (length p))
                        (string= base p
                                 :end1 (length base)
                                 :end2 (length base)))) (path-cache-programs *path-cache*)))
@@ -203,8 +196,7 @@ such a case, kill the shell command to resume StumpWM."
 (defcommand loadrc () ()
 "Reload the @file{~/.stumpwmrc} file."
   (handler-case
-      (progn
-        (with-restarts-menu (load-rc-file nil)))
+      (with-restarts-menu (load-rc-file nil))
     (error (c)
       (message "^1*^BError loading rc file: ^n~A" c))
     (:no-error (&rest args)
@@ -228,7 +220,7 @@ such a case, kill the shell command to resume StumpWM."
   (throw :top-level :quit))
 
 (defcommand restart-soft () ()
-  "Soft Restart StumpWM. The lisp process isn't restarted. Instead,
+  "Soft restart StumpWM. The lisp process isn't restarted. Instead,
 control jumps to the very beginning of the stumpwm program. This
 differs from RESTART, which restarts the unix process.
 
@@ -242,7 +234,7 @@ made and you wish to replace the existing process with it.
 
 Any run-time customizations will be lost after the restart."
   (throw :top-level :hup-process))
-                
+
 (defun find-matching-windows (props all-groups all-screens)
   "Returns list of windows matching @var{props} (see run-or-raise
 documentation for details). @var{all-groups} will find windows on all
@@ -280,29 +272,17 @@ By default, the global @var{*run-or-raise-all-groups*} decides whether
 to search all groups or the current one for a running
 instance. @var{all-groups} overrides this default. Similarily for
 @var{*run-or-raise-all-screens*} and @var{all-screens}."
-  (labels
-      ;; Raise the window win and select its frame.  For now, it
-      ;; does not select the screen.
-      ((goto-win (win)
-         (let* ((group (window-group win))
-                (frame (window-frame win))
-                (old-frame (tile-group-current-frame group)))
-           (focus-all win)
-           (unless (eq frame old-frame)
-             (show-frame-indicator group)))))
-    (let* ((matches (find-matching-windows props all-groups all-screens))
-           ;; other-matches is list of matches "after" the current
-           ;; win, if current win matches. getting 2nd element means
-           ;; skipping over the current win, to cycle through matches
-           (other-matches (member (current-window) matches))
-           (win (if (> (length other-matches) 1)
-                    (second other-matches)
-                    (first matches))))
-      (if win
-          (if (eq (type-of (window-group win)) 'float-group)
-              (focus-all win)
-              (goto-win win))
-          (run-shell-command cmd)))))
+  (let* ((matches (find-matching-windows props all-groups all-screens))
+         ;; other-matches is list of matches "after" the current
+         ;; win, if current win matches. getting 2nd element means
+         ;; skipping over the current win, to cycle through matches
+         (other-matches (member (current-window) matches))
+         (win (if (> (length other-matches) 1)
+                  (second other-matches)
+                  (first matches))))
+    (if win
+        (focus-all win)
+        (run-shell-command cmd))))
 
 (defun run-or-pull (cmd props &optional (all-groups *run-or-raise-all-groups*)
                     (all-screens *run-or-raise-all-screens*))
@@ -369,12 +349,14 @@ pull the program."
 used for matching windows with run-or-raise or window placement
 rules."
   (let ((w (current-window)))
-    (message-no-timeout "class: ~A~%instance: ~A~%type: :~A~%role: ~A~%title: ~A"
-                        (window-class w)
-                        (window-res w)
-                        (string (window-type w))
-                        (window-role w)
-                        (window-title w))))
+    (if (not w)
+        (message "No active window!")
+        (message-no-timeout "class: ~A~%instance: ~A~%type: :~A~%role: ~A~%title: ~A"
+                            (window-class w)
+                            (window-res w)
+                            (string (window-type w))
+                            (window-role w)
+                            (window-title w)))))
 
 (defcommand list-window-properties () ()
   "List all the properties of the current window and their values,

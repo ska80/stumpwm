@@ -1,6 +1,6 @@
 ;;; implementation of a floating style window management group
 
-(in-package :stumpwm)
+(in-package #:stumpwm)
 
 ;;; floating window
 
@@ -8,33 +8,30 @@
   ((last-width :initform 0 :accessor float-window-last-width)
    (last-height :initform 0 :accessor float-window-last-height)
    (last-x :initform 0 :accessor float-window-last-x)
-   (last-y :initform 0 :accessor float-window-last-y))
-  )
+   (last-y :initform 0 :accessor float-window-last-y)))
 
 (defvar *float-window-border* 1)
 (defvar *float-window-title-height* 10)
 
 ;; some book keeping functions
 (defmethod (setf window-x) :before (val (window float-window))
-  (unless (eql (window-x window) val)
-    (setf (float-window-last-x window) (window-x window))))
+  (setf (float-window-last-x window) (window-x window)))
 
 (defmethod (setf window-y) :before (val (window float-window))
-  (unless (eql (window-y window) val)
-    (setf (float-window-last-y window) (window-y window))))
+  (setf (float-window-last-y window) (window-y window)))
 
 (defmethod (setf window-width) :before (val (window float-window))
-  (unless (eql (window-width window) val)
-    (setf (float-window-last-width window) (window-width window))))
+  (setf (float-window-last-width window) (window-width window)))
 
 (defmethod (setf window-height) :before (val (window float-window))
-  (unless (eql (window-height window) val)
-    (setf (float-window-last-height window) (window-height window))))
+  (setf (float-window-last-height window) (window-height window)))
 
 (defun float-window-move-resize (win &key x y width height (border *float-window-border*))
   ;; x and y position the parent window while width, height resize the
   ;; xwin (meaning the parent will have a larger width).
-  (with-slots (xwin parent) win
+  (with-accessors ((xwin window-xwin)
+                   (parent window-parent))
+      win
     (xlib:with-state (parent)
       (xlib:with-state (xwin)
         (when x
@@ -61,8 +58,7 @@
     (xlib:clear-area (window-parent window))))
 
 (defmethod window-sync ((window float-window) hint)
-  (declare (ignore hint))
-  )
+  (declare (ignore hint)))
 
 (defmethod window-head ((window float-window))
   (let ((left (window-x window))
@@ -89,10 +85,19 @@
   (eql (window-state win) +normal-state+))
 
 (defmethod (setf window-fullscreen) :after (val (window float-window))
-  (with-slots (last-x last-y last-width last-height parent) window
+  (with-accessors ((last-x float-window-last-x)
+                   (last-y float-window-last-y)
+                   (last-width float-window-last-width)
+                   (last-height float-window-last-height)
+                   (parent window-parent))
+      window
     (if val
         (let ((head (window-head window)))
-          (with-slots (x y width height) window
+          (with-accessors ((x window-x)
+                           (y window-y)
+                           (width window-width)
+                           (height window-height))
+              window
             (format t "major on: ~a ~a ~a ~a~%" x y width height))
           (set-window-geometry window :x 0 :y 0)
           (float-window-move-resize window
@@ -112,45 +117,52 @@
                                     :width last-width
                                     :height last-height)))))
 
+(defmethod really-raise-window ((window float-window))
+  (raise-window window))
+
 ;;; floating group
 
 (defclass float-group (group)
-  ((current-window :accessor float-group-current-window))
-  )
+  ((current-window :accessor float-group-current-window)))
 
-(defmethod group-startup ((group float-group))
-  )
+(defmethod group-startup ((group float-group)))
 
-(defmethod group-add-window ((group float-group) window &key &allow-other-keys)
-  (change-class window 'float-window)
-  (float-window-align window)
-  (focus-window window))
+(flet ((add-float-window (group window)
+         (change-class window 'float-window)
+         (float-window-align window)
+         (group-focus-window group window)))
+  (defmethod group-add-window ((group float-group) window &key &allow-other-keys)
+    (add-float-window group window))
+  (defmethod group-add-window (group (window float-window) &key &allow-other-keys)
+    (add-float-window group window)))
 
-(defun &float-focus-next (group)
+(defun %float-focus-next (group)
   (if (group-windows group)
-      (focus-window (first (group-windows group)))
+      (group-focus-window group (first (group-windows group)))
       (no-focus group nil)))
 
-(defmethod group-delete-window ((group float-group) window)
+(defmethod group-delete-window ((group float-group) (window float-window))
   (declare (ignore window))
-  (&float-focus-next group))
+  (%float-focus-next group))
 
 (defmethod group-wake-up ((group float-group))
-  (&float-focus-next group))
+  (%float-focus-next group))
 
-(defmethod group-suspend ((group float-group))
-  )
-
-(defmethod group-current-window ((group float-group))
-  (screen-focus (group-screen group)))
+(defmethod group-suspend ((group float-group)))
 
 (defmethod group-current-head ((group float-group))
-  (if (group-current-window group)
-      (window-head (group-current-window group))
-      (first (screen-heads (group-screen group)))))
+  (if-let ((current-window (group-current-window group)))
+    (window-head current-window)
+    (multiple-value-bind (x y)
+        (xlib:global-pointer-position *display*)
+      (find-head-by-position (group-screen group) x y))))
 
 (defun float-window-align (window)
-  (with-slots (parent xwin width height) window
+  (with-accessors ((parent window-parent)
+                   (xwin window-xwin)
+                   (width window-width)
+                   (height window-height))
+      window
     (set-window-geometry window :x *float-window-border* :y *float-window-title-height*)
     (xlib:with-state (parent)
       (setf (xlib:drawable-width parent) (+ width (* 2 *float-window-border*))
@@ -168,10 +180,10 @@
 
 (defmethod group-raise-request ((group float-group) window type)
   (declare (ignore type))
-  (focus-window window))
+  (group-focus-window group window))
 
 (defmethod group-lost-focus ((group float-group))
-  (&float-focus-next group))
+  (%float-focus-next group))
 
 (defmethod group-indicate-focus ((group float-group))
   )
@@ -198,12 +210,12 @@
   (declare (ignore head))
   )
 
-(defmethod group-button-press ((group float-group) x y (window float-window))
+(defmethod group-button-press (group x y (window float-window))
   (let ((screen (group-screen group))
         (initial-width (xlib:drawable-width (window-parent window)))
         (initial-height (xlib:drawable-height (window-parent window))))
-    (when (eq *mouse-focus-policy* :click)
-      (focus-window window))
+    (when (member *mouse-focus-policy* '(:click :sloppy))
+      (group-focus-window group window))
 
     ;; When in border
     (multiple-value-bind (relx rely same-screen-p child state-mask)
@@ -229,7 +241,8 @@
                      (case event-key
                        (:button-release :done)
                        (:motion-notify
-                        (with-slots (parent) window
+                        (with-accessors ((parent window-parent))
+                            window
                           (xlib:with-state (parent)
                             ;; Either move or resize the window
                             (cond
@@ -247,9 +260,8 @@
                                                            :width (max w *min-frame-width*)
                                                            :height (max h *min-frame-height*)))))))
                         t)
-                       ;; We need to eat these events or they'll ALL
-                       ;; come blasting in later. Also things start
-                       ;; lagging hard if we don't (on clisp anyway).
+                       ;; We need to eat these events or they'll ALL come blasting in later. Also
+                       ;; things start lagging hard if we don't.
                        (:configure-notify t)
                        (:exposure t)
                        (t nil))))
@@ -269,7 +281,15 @@
 
 (defmethod group-button-press ((group float-group) x y where)
   (declare (ignore x y where))
-  )
+  (when (next-method-p)
+    (call-next-method)))
+
+;;; Bindings
+
+(pushnew '(float-group *float-group-top-map*) *group-top-maps*)
+(defvar *float-group-top-map* (make-sparse-keymap))
+(defvar *float-group-root-map* (make-sparse-keymap))
+
 
 (defcommand gnew-float (name) ((:rest "Group Name: "))
   "Create a floating window group with the specified name and switch to it."

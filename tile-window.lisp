@@ -55,7 +55,7 @@ like xterm and emacs.")
 
 ;;;;
 
-(defun really-raise-window (window)
+(defmethod really-raise-window ((window tile-window))
   (frame-raise-window (window-group window) (window-frame window) window))
 
 (defun raise-modals-of (window)
@@ -205,13 +205,17 @@ than the root window's width and height."
 
 ;;;
 
+(defun only-tile-windows (windows)
+  (remove-if-not (lambda (w) (typep w 'tile-window))
+                 windows))
+
 (defun focus-next-window (group)
-  (focus-forward group (sort-windows group)))
+  (focus-forward group (only-tile-windows (sort-windows group))))
 
 (defun focus-prev-window (group)
   (focus-forward group
                  (reverse
-                  (sort-windows group))))
+                  (only-tile-windows (sort-windows group)))))
 
 (defcommand (next tile-group) () ()
   "Go to the next window in the window list."
@@ -227,7 +231,7 @@ than the root window's width and height."
         (focus-prev-window group)
         (other-window group))))
 
-(defun pull-window (win &optional (to-frame (tile-group-current-frame (window-group win))))
+(defun pull-window (win &optional (to-frame (tile-group-current-frame (window-group win))) (focus-p t))
   (let ((f (window-frame win))
         (group (window-group win)))
     (unless (eq (frame-window to-frame) win)
@@ -239,7 +243,7 @@ than the root window's width and height."
       ;; We have to restore the focus after hiding.
       (when (eq win (screen-focus (window-screen win)))
         (screen-set-focus (window-screen win) win))
-      (frame-raise-window group to-frame win)
+      (frame-raise-window group to-frame win focus-p)
       ;; if win was focused in its old frame then give the old
       ;; frame the frame's last focused window.
       (when (eq (frame-window f) win)
@@ -283,7 +287,8 @@ frame."
 
 (defun other-hidden-window (group)
   "Return the last window that was accessed and that is hidden."
-  (let ((wins (remove-if (lambda (w) (eq (frame-window (window-frame w)) w)) (group-windows group))))
+  (let ((wins (remove-if (lambda (w) (eq (frame-window (window-frame w)) w))
+                         (only-tile-windows (group-windows group)))))
     (first wins)))
 
 (defun pull-other-hidden-window (group)
@@ -307,17 +312,29 @@ current frame and raise it."
 (defcommand (pull-hidden-next tile-group) () ()
 "Pull the next hidden window into the current frame."
   (let ((group (current-group)))
-    (focus-forward group (sort-windows group) t (lambda (w) (not (eq (frame-window (window-frame w)) w))))))
+    (focus-forward group (only-tile-windows (sort-windows group)) t
+                   (lambda (w) (not (eq (frame-window (window-frame w)) w))))))
 
 (defcommand (pull-hidden-previous tile-group) () ()
 "Pull the next hidden window into the current frame."
   (let ((group (current-group)))
-    (focus-forward group (nreverse (sort-windows group)) t (lambda (w) (not (eq (frame-window (window-frame w)) w))))))
+    (focus-forward group (nreverse (only-tile-windows (sort-windows group))) t
+                   (lambda (w) (not (eq (frame-window (window-frame w)) w))))))
 
 (defcommand (pull-hidden-other tile-group) () ()
 "Pull the last focused, hidden window into the current frame."
   (let ((group (current-group)))
     (pull-other-hidden-window group)))
+
+(defcommand (pull-from-windowlist tile-group) () ()
+  "Pulls a window selected from the list of windows.
+This allows a behavior similar to Emacs' switch-to-buffer
+when selecting another window."
+  (let ((pulled-window (select-window-from-menu
+                        (group-windows (current-group))
+                        *window-format*)))
+    (when pulled-window
+      (pull-window pulled-window))))
 
 (defun exchange-windows (win1 win2)
   "Exchange the windows in their respective frames."
@@ -355,7 +372,7 @@ current frame and raise it."
 
 (defcommand (fullscreen tile-group) () ()
   "Toggle the fullscreen mode of the current widnow. Use this for clients
-with broken (non-NETWM) fullscreen implemenations, such as any program
+with broken (non-NETWM) fullscreen implementations, such as any program
 using SDL."
   (update-fullscreen (current-window) 2))
 
@@ -405,7 +422,7 @@ frame. Possible values are:
                                   ((:y-or-n "Lock to group? ")
                                    (:y-or-n "Use title? "))
   "Make a generic placement rule for the current window. Might be too specific/not specific enough!"
-  (make-rule-for-window (current-window) (first lock) (first title)))
+  (make-rule-for-window (current-window) lock title))
 
 (defcommand (forget tile-group) () ()
   "Forget the window placement rule that matches the current window."
@@ -468,10 +485,10 @@ frame. Possible values are:
 frame and focus the selected window.  The optional argument @var{fmt} can be
 specified to override the default window formatting."
   (let* ((group (current-group))
-	 (frame (tile-group-current-frame group)))
+         (frame (tile-group-current-frame group)))
     (if (null (frame-windows group frame))
-	(message "No Managed Windows")
-	(let ((window (select-window-from-menu (frame-sort-windows group frame) fmt)))
-	  (if window
-	      (group-focus-window group window)
-	      (throw 'error :abort))))))
+        (message "No Managed Windows")
+        (let ((window (select-window-from-menu (frame-sort-windows group frame) fmt)))
+          (if window
+              (group-focus-window group window)
+              (throw 'error :abort))))))

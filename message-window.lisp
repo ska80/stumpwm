@@ -87,7 +87,7 @@ function expects to be wrapped in a with-state for win."
   (let ((win (screen-message-window screen)))
     ;; Now that we know the dimensions, raise and resize it.
     (xlib:with-state (win)
-      (setf (xlib:drawable-height win) height
+      (setf (xlib:drawable-height win) (+ height (* *message-window-y-padding* 2))
             (xlib:drawable-width win) (+ width (* *message-window-padding* 2))
             (xlib:window-priority win) :above)
       (setup-win-gravity screen win *message-window-gravity*))
@@ -96,15 +96,6 @@ function expects to be wrapped in a with-state for win."
     ;; Have to flush this or the window might get cleared
     ;; after we've already started drawing it.
     (xlib:display-finish-output *display*)))
-
-(defun invert-rect (screen win x y width height)
-  "invert the color in the rectangular area. Used for highlighting text."
-  (let ((gcontext (xlib:create-gcontext :drawable win
-                                        :foreground (screen-fg-color screen)
-                                        :function boole-xor)))
-    (xlib:draw-rectangle win gcontext x y width height t)
-    (setf (xlib:gcontext-foreground gcontext) (screen-bg-color screen))
-    (xlib:draw-rectangle win gcontext x y width height t)))
 
 (defun unmap-message-window (screen)
   "Unmap the screen's message window, if it is mapped."
@@ -229,7 +220,11 @@ function expects to be wrapped in a with-state for win."
       (multiple-value-bind (width height)
           (rendered-size strings (screen-message-cc screen))
         (setup-message-window screen width height)
-        (render-strings screen (screen-message-cc screen) *message-window-padding* 0 strings highlights))
+        (render-strings (screen-message-cc screen)
+                        *message-window-padding*
+                        *message-window-y-padding*
+                        strings
+                        highlights))
       (setf (screen-current-msg screen)
             strings
             (screen-current-msg-highlights screen)

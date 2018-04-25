@@ -32,35 +32,50 @@
 (defvar *current-event-time* nil)
 
 (defmacro define-stump-event-handler (event keys &body body)
-  (let ((fn-name (gensym))
-        (event-slots (gensym)))
-    `(labels ((,fn-name (&rest ,event-slots &key ,@keys &allow-other-keys)
-               (declare (ignore ,event-slots))
-               ,@body))
-      (setf (gethash ,event *event-fn-table*) #',fn-name))))
+  (let ((event-slots (gensym)))
+    (multiple-value-bind (body declarations docstring)
+        (parse-body body :documentation t)
+      `(setf (gethash ,event *event-fn-table*)
+             (lambda (&rest ,event-slots &key ,@keys &allow-other-keys)
+               (declare (ignore ,event-slots)
+                        ,@(cdar declarations))
+               ,@(when docstring
+                   (list docstring))
+               ,@body)))))
 
-                                        ;(define-stump-event-handler :map-notify (event-window window override-redirect-p)
-                                        ;  )
+;;; Configure request
 
-(defun handle-mode-line-window (xwin x y width height)
-  (declare (ignore width))
-  (let ((ml (find-mode-line-window xwin)))
-    (when ml
-      (setf (xlib:drawable-height xwin) height)
-      (update-mode-line-position ml x y)
-      (resize-mode-line ml)
-      (sync-mode-line ml))))
+(flet ((has-x (mask) (= 1 (logand mask 1)))
+       (has-y (mask) (= 2 (logand mask 2)))
+       (has-w (mask) (= 4 (logand mask 4)))
+       (has-h (mask) (= 8 (logand mask 8)))
+       (has-bw (mask) (= 16 (logand mask 16)))
+       (has-stackmode (mask) (= 64 (logand mask 64))))
+  (defun configure-managed-window (win x y width height stack-mode value-mask)
+    ;; Grant the configure request but then maximize the window after the
+    ;; granting.
+    (when (or (has-w value-mask)
+              (has-h value-mask)
+              (has-stackmode value-mask))
+      ;; FIXME: I don't know why we need to clear the urgency bit
+      ;; here, but the old code would anytime a resize or raise
+      ;; request came in, so keep doing it. -sabetts
+      (when (window-urgent-p win)
+        (window-clear-urgency win)))
+    (when (or (has-x value-mask) (has-y value-mask))
+      (group-move-request (window-group win) win x y :parent))
+    (when (or (has-w value-mask) (has-h value-mask))
+      (group-resize-request (window-group win) win width height))
+    (when (has-stackmode value-mask)
+      (group-raise-request (window-group win) win stack-mode))
+    ;; Just to be on the safe side, hit the client with a fake
+    ;; configure event. The ICCCM says we have to do this at
+    ;; certain times; exactly when, I've sorta forgotten.
+    (update-configuration win))
 
-(defun handle-unmanaged-window (xwin x y width height border-width value-mask)
-  "Call this function for windows that stumpwm isn't
-  managing. Basically just give the window what it wants."
-  (labels ((has-x (mask) (= 1 (logand mask 1)))
-           (has-y (mask) (= 2 (logand mask 2)))
-           (has-w (mask) (= 4 (logand mask 4)))
-           (has-h (mask) (= 8 (logand mask 8)))
-           (has-bw (mask) (= 16 (logand mask 16)))
-           ;; (has-stackmode (mask) (= 64 (logand mask 64)))
-           )
+  (defun configure-unmanaged-window (xwin x y width height border-width value-mask)
+    "Call this function for windows that stumpwm isn't
+     managing. Basically just give the window what it wants."
     (xlib:with-state (xwin)
       (when (has-x value-mask)
         (setf (xlib:drawable-x xwin) x))
@@ -73,60 +88,28 @@
       (when (has-bw value-mask)
         (setf (xlib:drawable-border-width xwin) border-width)))))
 
-(defun update-configuration (win)
-  ;; Send a synthetic configure-notify event so that the window
-  ;; knows where it is onscreen.
-  (xwin-send-configuration-notify (window-xwin win)
-                                  (xlib:drawable-x (window-parent win))
-                                  (xlib:drawable-y (window-parent win))
-                                  (window-width win) (window-height win) 0))
-
 (define-stump-event-handler :configure-request (stack-mode #|parent|# window #|above-sibling|# x y width height border-width value-mask)
-  (labels ((has-x () (= 1 (logand value-mask 1)))
-           (has-y () (= 2 (logand value-mask 2)))
-           (has-w () (= 4 (logand value-mask 4)))
-           (has-h () (= 8 (logand value-mask 8)))
-           (has-stackmode () (= 64 (logand value-mask 64))))
-    ;; Grant the configure request but then maximize the window after the granting.
-    (dformat 3 "CONFIGURE REQUEST ~@{~S ~}~%" stack-mode window x y width height border-width value-mask)
-    (let ((win (find-window window)))
-      (cond
-        (win
-         (when (or (has-w) (has-h) (has-stackmode))
-           ;; FIXME: I don't know why we need to clear the urgency bit
-           ;; here, but the old code would anytime a resize or raise
-           ;; request came in, so keep doing it. -sabetts
-           (when (window-urgent-p win)
-             (window-clear-urgency win)))
-         (when (or (has-x) (has-y))
-           (group-move-request (window-group win) win x y :parent))
-         (when (or (has-w) (has-h))
-           (group-resize-request (window-group win) win width height))
-         (when (has-stackmode)
-           (group-raise-request (window-group win) win stack-mode))
-         ;; Just to be on the safe side, hit the client with a fake
-         ;; configure event. The ICCCM says we have to do this at
-         ;; certain times; exactly when, I've sorta forgotten.
-         (update-configuration win))
-        ((handle-mode-line-window win x y width height))
-        (t (handle-unmanaged-window window x y width height border-width value-mask))))))
+  (dformat 3 "CONFIGURE REQUEST ~@{~S ~}~%" stack-mode window x y width height border-width value-mask)
+  (if-let ((win (find-window window)))
+    (configure-managed-window win x y width height stack-mode value-mask)
+    (configure-unmanaged-window window x y width height border-width value-mask)))
 
 (define-stump-event-handler :configure-notify (stack-mode #|parent|# window #|above-sibling|# x y width height border-width value-mask)
   (dformat 4 "CONFIGURE NOTIFY ~@{~S ~}~%" stack-mode window x y width height border-width value-mask)
-  (let ((screen (find-screen window)))
-    (when screen
-      (let ((old-heads (copy-list (screen-heads screen))))
-        (setf (screen-heads screen) nil)
-        (let ((new-heads (make-screen-heads screen (screen-root screen))))
-          (setf (screen-heads screen) old-heads)
-          (cond
-            ((equalp old-heads new-heads)
-             (dformat 3 "Bogus configure-notify on root window of ~S~%" screen) t)
-            (t
-             (dformat 1 "Updating Xinerama configuration for ~S.~%" screen)
-             (if new-heads
-                 (head-force-refresh screen new-heads)
-                 (dformat 1 "Invalid configuration! ~S~%" new-heads)))))))))
+  (when-let ((screen (find-screen window)))
+    (let ((old-heads (screen-heads screen))
+          (new-heads (make-screen-heads screen (screen-root screen))))
+      (cond
+        ((equalp old-heads new-heads)
+         (dformat 3 "Bogus configure-notify on root window of ~S~%" screen) t)
+        (t
+         (dformat 1 "Updating Xinerama configuration for ~S.~%" screen)
+         (if new-heads
+             (progn (head-force-refresh screen new-heads)
+                    (update-mode-lines screen)
+                    (loop for new-head in new-heads
+                       do (run-hook-with-args *new-head-hook* new-head screen)))
+             (dformat 1 "Invalid configuration! ~S~%" new-heads)))))))
 
 (define-stump-event-handler :map-request (parent send-event-p window)
   (unless send-event-p
@@ -155,8 +138,9 @@
          ;; anyway.
          t)
         (t
-         (let ((window (process-mapped-window screen window)))
-           (group-raise-request (window-group window) window :map)))))))
+         (xlib:with-server-grabbed (*display*)
+           (let ((window (process-mapped-window screen window)))
+             (group-raise-request (window-group window) window :map))))))))
 
 (define-stump-event-handler :unmap-notify (send-event-p event-window window #|configure-p|#)
   ;; There are two kinds of unmap notify events: the straight up
@@ -166,21 +150,14 @@
   (dformat 2 "UNMAP: ~s ~s ~a~%" send-event-p (not (xlib:window-equal event-window window)) (find-window window))
   (unless (and (not send-event-p)
                (not (xlib:window-equal event-window window)))
-    (let ((window (find-window window)))
-      ;; if we can't find the window then there's nothing we need to
-      ;; do.
-      (when window
-        (if (plusp (window-unmap-ignores window))
-            (progn
-              (dformat 3 "decrement ignores! ~d~%" (window-unmap-ignores window))
-              (decf (window-unmap-ignores window)))
-            (withdraw-window window))))))
-
-;;(define-stump-event-handler :create-notify (#|window parent x y width height border-width|# override-redirect-p))
-;; (unless (or override-redirect-p
-;;          (internal-window-p (window-screen window) window))
-;;    (process-new-window (window-screen window) window))
-;;    (run-hook-with-args *new-window-hook* window)))
+    ;; if we can't find the window then there's nothing we need to
+    ;; do.
+    (when-let ((window (find-window window)))
+      (if (plusp (window-unmap-ignores window))
+          (progn
+            (dformat 3 "decrement ignores! ~d~%" (window-unmap-ignores window))
+            (decf (window-unmap-ignores window)))
+          (withdraw-window window)))))
 
 (define-stump-event-handler :destroy-notify (send-event-p event-window window)
   (unless (or send-event-p
@@ -188,13 +165,11 @@
     ;; Ignore structure destroy notifies and only
     ;; use substructure destroy notifiers. This way
     ;; event-window is the window's parent.
-    (let ((win (or (find-window window)
-                   (find-withdrawn-window window))))
-      (if win
-          (destroy-window win)
-          (progn
-            (let ((ml (find-mode-line-window window)))
-              (when ml (destroy-mode-line-window ml))))))))
+    (if-let ((win (or (find-window window)
+                      (find-withdrawn-window window))))
+      (destroy-window win)
+      (when-let ((ml (find-mode-line-by-window window)))
+        (destroy-mode-line ml)))))
 
 (defun read-from-keymap (kmaps &optional update-fn)
   "Read a sequence of keys from the user, guided by the keymaps,
@@ -309,9 +284,10 @@ chunks."
       (setf (screen-last-msg screen) '()
             (screen-last-msg-highlights screen) '())
       (eval-command cmd)
-      (xlib:change-property win :stumpwm_command_result
-                            (string-to-bytes (format nil "~{~{~a~%~}~}" (nreverse (screen-last-msg screen))))
-                            :string 8)
+      (let ((message (format nil "~{~{~a~%~}~}" (nreverse (screen-last-msg screen)))))
+        (xlib:change-property win :stumpwm_command_result
+                              (string-to-octets message)
+                              :string 8))
       (setf (screen-last-msg screen) msgs
             (screen-last-msg-highlights screen) hlts))
     (xlib:display-finish-output *display*)))
@@ -387,9 +363,8 @@ converted to an atom is removed."
                   screen)
          (handle-stumpwm-commands window))))
     (t
-     (let ((window (find-window window)))
-       (when window
-         (update-window-properties window atom))))))
+     (when-let ((window (find-window window)))
+       (update-window-properties window atom)))))
 
 (define-stump-event-handler :mapping-notify (request start count)
   ;; We could be a bit more intelligent about when to update the
@@ -403,6 +378,20 @@ converted to an atom is removed."
 
 (define-stump-event-handler :selection-clear (selection)
   (setf (getf *x-selection* selection) nil))
+
+(define-stump-event-handler :selection-notify (window property selection)
+  (dformat 2 "selection-notify: ~s ~s ~s~%" window property selection)
+  (when property
+    (let* ((selection (or selection :primary))
+           (sel-string (utf8-to-string
+                        (xlib:get-property window
+                                           property
+                                           :type :utf8_string
+                                           :result-type 'vector
+                                           :delete-p t))))
+      (when (< 0 (length sel-string))
+        (setf (getf *x-selection* selection) sel-string)
+        (run-hook-with-args *selection-notify-hook* sel-string)))))
 
 (defun find-message-window-screen (win)
   "Return the screen, if any, that message window WIN belongs."
@@ -433,7 +422,7 @@ converted to an atom is removed."
          (if (plusp (screen-ignore-msg-expose screen))
              (decf (screen-ignore-msg-expose screen))
              (redraw-current-message screen)))
-        ((setf ml (find-mode-line-window window))
+        ((setf ml (find-mode-line-by-window window))
          (setf screen (mode-line-screen ml))
          (redraw-mode-line ml t)))
       ;; Show the area.
@@ -485,9 +474,8 @@ converted to an atom is removed."
             (echo-string (window-screen window) (format nil "'~a' denied map request" (window-name window)))
             (echo-string (window-screen window) (format nil "'~a' denied map request in group ~a" (window-name window) (group-name (window-group window))))))
       (frame-raise-window (window-group window) (window-frame window) window
-                          (if (eq (window-frame window)
-                                  (tile-group-current-frame (window-group window)))
-                              t nil))))
+                          (eq (window-frame window)
+                              (tile-group-current-frame (window-group window))))))
 
 (defun maybe-raise-window (window)
   (if (deny-request-p window *deny-raise-request*)
@@ -528,46 +516,43 @@ converted to an atom is removed."
              (focus-all our-window)
              (maybe-raise-window our-window)))))
     (:_NET_CLOSE_WINDOW
-     (let ((our-window (find-window window)))
-       (when our-window
-         (delete-window our-window))))
+     (when-let ((our-window (find-window window)))
+       (delete-window our-window)))
     (:_NET_WM_STATE
-     (let ((our-window (find-window window)))
-       (when our-window
-         (let ((action (elt data 0))
-               (p1 (elt data 1))
-               (p2 (elt data 2)))
-           (dolist (p (list p1 p2))
-             ;; Sometimes the number cannot be converted to an atom, so skip them.
-             (unless (or (= p 0)
-                         (not (typep p '(unsigned-byte 29))))
-               (case (safe-atom-name p)
-                 (:_NET_WM_STATE_DEMANDS_ATTENTION
-                  (case action
-                    (1
-                     (add-wm-state window :_NET_WM_STATE_DEMANDS_ATTENTION))
-                    (2
-                     (unless (find-wm-state window :_NET_WM_STATE_DEMANDS_ATTENTION)
-                       (add-wm-state window :_NET_WM_STATE_DEMANDS_ATTENTION))))
-                  (maybe-set-urgency our-window))
-               (:_NET_WM_STATE_FULLSCREEN
-                (update-fullscreen our-window action)))))))))
+     (when-let ((our-window (find-window window))
+                (action (elt data 0))
+                (p1 (elt data 1))
+                (p2 (elt data 2)))
+       (dolist (p (list p1 p2))
+         ;; Sometimes the number cannot be converted to an atom, so skip them.
+         (unless (or (= p 0)
+                     (not (typep p '(unsigned-byte 29))))
+           (case (safe-atom-name p)
+             (:_NET_WM_STATE_DEMANDS_ATTENTION
+              (case action
+                (1
+                 (add-wm-state window :_NET_WM_STATE_DEMANDS_ATTENTION))
+                (2
+                 (unless (find-wm-state window :_NET_WM_STATE_DEMANDS_ATTENTION)
+                   (add-wm-state window :_NET_WM_STATE_DEMANDS_ATTENTION))))
+              (maybe-set-urgency our-window))
+             (:_NET_WM_STATE_FULLSCREEN
+              (update-fullscreen our-window action)))))))
   (:_NET_MOVERESIZE_WINDOW
-   (let ((our-window (find-window window)))
-     (when our-window
-       (let ((x (elt data 1))
-             (y (elt data 2)))
-         (dformat 3 "!!! Data: ~S~%" data)
-         (group-move-request (window-group our-window) our-window x y :root)))))
+   (when-let ((our-window (find-window window))
+              (x (elt data 1))
+              (y (elt data 2)))
+     (dformat 3 "!!! Data: ~S~%" data)
+     (group-move-request (window-group our-window) our-window x y :root)))
   (t
    (dformat 2 "ignored message~%"))))
 
 (define-stump-event-handler :focus-out (window mode kind)
   (dformat 5 "~@{~s ~}~%" window mode kind))
 
-(define-stump-event-handler :focus-in (window mode)
+(define-stump-event-handler :focus-in (window mode kind)
   (let ((win (find-window window)))
-    (when (and win (eq mode :normal))
+    (when (and win (eq mode :normal) (not (eq kind :pointer)))
       (let ((screen (window-screen win)))
         (unless (eq win (screen-focus screen))
           (setf (screen-focus screen) win))))))
@@ -592,22 +577,25 @@ the window in it's frame."
         (update-all-mode-lines)))))
 
 (define-stump-event-handler :button-press (window code x y child time)
-  (let (screen ml win)
+  (let ((screen (find-screen window))
+        (mode-line (find-mode-line-by-window window))
+        (win (find-window-by-parent window (top-windows))))
     (cond
-      ((and (setf screen (find-screen window)) (not child))
+      ((and screen (not child))
        (group-button-press (screen-current-group screen) x y :root)
        (run-hook-with-args *root-click-hook* screen code x y))
-      ((setf ml (find-mode-line-window window))
-       (run-hook-with-args *mode-line-click-hook* ml code x y))
-      ((setf win (find-window-by-parent window (top-windows)))
+      (mode-line
+       (run-hook-with-args *mode-line-click-hook* mode-line code x y))
+      (win
        (group-button-press (window-group win) x y win))))
   ;; Pass click to client
   (xlib:allow-events *display* :replay-pointer time))
 
-;; Handling event :KEY-PRESS
-;; (:DISPLAY #<XLIB:DISPLAY :0 (The X.Org Foundation R60700000)> :EVENT-KEY :KEY-PRESS :EVENT-CODE 2 :SEND-EVENT-P NIL :CODE 45 :SEQUENCE 1419 :TIME 98761213 :ROOT #<XLIB:WINDOW :0 96> :WINDOW #<XLIB:WINDOW :0 6291484> :EVENT-WINDOW #<XLIB:WINDOW :0 6291484> :CHILD
-;;  #<XLIB:WINDOW :0 6291485> :ROOT-X 754 :ROOT-Y 223 :X 753 :Y 222 :STATE 4 :SAME-SCREEN-P T)
-;; H
+(defun make-xlib-window (drawable)
+  "For some reason the CLX xid cache screws up returns pixmaps when
+they should be windows. So use this function to make a window out of DRAWABLE."
+  (xlib::make-window :id (xlib:drawable-id drawable)
+                     :display *display*))
 
 (defun handle-event (&rest event-slots &key display event-key &allow-other-keys)
   (declare (ignore display))
@@ -616,14 +604,14 @@ the window in it's frame."
         (win (getf event-slots :window))
         (*current-event-time* (getf event-slots :time)))
     (when eventfn
-      ;; XXX: In both the clisp and sbcl clx libraries, sometimes what
-      ;; should be a window will be a pixmap instead. In this case, we
-      ;; need to manually translate it to a window to avoid breakage
-      ;; in stumpwm. So far the only slot that seems to be affected is
-      ;; the :window slot for configure-request and reparent-notify
-      ;; events. It appears as though the hash table of XIDs and clx
-      ;; structures gets out of sync with X or perhaps X assigns a
-      ;; duplicate ID for a pixmap and a window.
+      ;; XXX: In sbcl clx libraries, sometimes what should be a window
+      ;; will be a pixmap instead. In this case, we need to manually
+      ;; translate it to a window to avoid breakage in stumpwm. So far
+      ;; the only slot that seems to be affected is the :window slot
+      ;; for configure-request and reparent-notify events. It appears
+      ;; as though the hash table of XIDs and clx structures gets out
+      ;; of sync with X or perhaps X assigns a duplicate ID for a
+      ;; pixmap and a window.
       (when (and win (not (xlib:window-p win)))
         (dformat 10 "Pixmap Workaround! ~s should be a window!~%" win)
         (setf (getf event-slots :window) (make-xlib-window win)))
@@ -638,13 +626,12 @@ the window in it's frame."
               (apply eventfn event-slots))
             (xlib:display-finish-output *display*))
         ((or xlib:window-error xlib:drawable-error) (c)
-          ;; Asynchronous errors are handled in the error
-          ;; handler. Synchronous errors like trying to get the window
-          ;; hints on a deleted window are caught and ignored here. We
-          ;; do this inside the event handler so that the event is
-          ;; handled. If we catch it higher up the event will not be
-          ;; flushed from the queue and we'll get ourselves into an
-          ;; infinite loop.
+          ;; Asynchronous errors are handled in the error handler.
+          ;; Synchronous errors like trying to get the window hints on
+          ;; a deleted window are caught and ignored here. We do this
+          ;; inside the event handler so that the event is handled. If
+          ;; we catch it higher up the event will not be flushed from
+          ;; the queue and we'll get ourselves into an infinite loop.
           (dformat 4 "ignore synchronous ~a~%" c))))
     (dformat 2 "<<< ~S~%" event-key)
     t))
